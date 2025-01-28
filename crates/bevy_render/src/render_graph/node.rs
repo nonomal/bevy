@@ -3,31 +3,62 @@ use crate::{
         Edge, InputSlotError, OutputSlotError, RenderGraphContext, RenderGraphError,
         RunSubGraphError, SlotInfo, SlotInfos,
     },
+    render_phase::DrawError,
     renderer::RenderContext,
 };
-use bevy_ecs::world::World;
-use bevy_utils::Uuid;
+pub use bevy_ecs::label::DynEq;
+use bevy_ecs::{
+    define_label,
+    intern::Interned,
+    query::{QueryItem, QueryState, ReadOnlyQueryData},
+    world::{FromWorld, World},
+};
+use core::fmt::Debug;
 use downcast_rs::{impl_downcast, Downcast};
-use std::{borrow::Cow, fmt::Debug};
 use thiserror::Error;
+use variadics_please::all_tuples_with_size;
 
-/// A [`Node`] identifier.
-/// It automatically generates its own random uuid.
-///
-/// This id is used to reference the node internally (edges, etc).
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct NodeId(Uuid);
+pub use bevy_render_macros::RenderLabel;
 
-impl NodeId {
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        NodeId(Uuid::new_v4())
-    }
+use super::{InternedRenderSubGraph, RenderSubGraph};
 
-    pub fn uuid(&self) -> &Uuid {
-        &self.0
+define_label!(
+    #[diagnostic::on_unimplemented(
+        note = "consider annotating `{Self}` with `#[derive(RenderLabel)]`"
+    )]
+    /// A strongly-typed class of labels used to identify a [`Node`] in a render graph.
+    RenderLabel,
+    RENDER_LABEL_INTERNER
+);
+
+/// A shorthand for `Interned<dyn RenderLabel>`.
+pub type InternedRenderLabel = Interned<dyn RenderLabel>;
+
+pub trait IntoRenderNodeArray<const N: usize> {
+    fn into_array(self) -> [InternedRenderLabel; N];
+}
+
+macro_rules! impl_render_label_tuples {
+    ($N: expr, $(#[$meta:meta])* $(($T: ident, $I: ident)),*) => {
+        $(#[$meta])*
+        impl<$($T: RenderLabel),*> IntoRenderNodeArray<$N> for ($($T,)*) {
+            #[inline]
+            fn into_array(self) -> [InternedRenderLabel; $N] {
+                let ($($I,)*) = self;
+                [$($I.intern(), )*]
+            }
+        }
     }
 }
+
+all_tuples_with_size!(
+    #[doc(fake_variadic)]
+    impl_render_label_tuples,
+    1,
+    32,
+    T,
+    l
+);
 
 /// A render node that can be added to a [`RenderGraph`](super::RenderGraph).
 ///
@@ -60,11 +91,11 @@ pub trait Node: Downcast + Send + Sync + 'static {
     /// Runs the graph node logic, issues draw calls, updates the output slots and
     /// optionally queues up subgraphs for execution. The graph data, input and output values are
     /// passed via the [`RenderGraphContext`].
-    fn run(
+    fn run<'w>(
         &self,
         graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
+        render_context: &mut RenderContext<'w>,
+        world: &'w World,
     ) -> Result<(), NodeRunError>;
 }
 
@@ -78,17 +109,37 @@ pub enum NodeRunError {
     OutputSlotError(#[from] OutputSlotError),
     #[error("encountered an error when running a sub-graph")]
     RunSubGraphError(#[from] RunSubGraphError),
+    #[error("encountered an error when executing draw command")]
+    DrawError(#[from] DrawError),
 }
 
 /// A collection of input and output [`Edges`](Edge) for a [`Node`].
 #[derive(Debug)]
 pub struct Edges {
-    pub id: NodeId,
-    pub input_edges: Vec<Edge>,
-    pub output_edges: Vec<Edge>,
+    label: InternedRenderLabel,
+    input_edges: Vec<Edge>,
+    output_edges: Vec<Edge>,
 }
 
 impl Edges {
+    /// Returns all "input edges" (edges going "in") for this node .
+    #[inline]
+    pub fn input_edges(&self) -> &[Edge] {
+        &self.input_edges
+    }
+
+    /// Returns all "output edges" (edges going "out") for this node .
+    #[inline]
+    pub fn output_edges(&self) -> &[Edge] {
+        &self.output_edges
+    }
+
+    /// Returns this node's label.
+    #[inline]
+    pub fn label(&self) -> InternedRenderLabel {
+        self.label
+    }
+
     /// Adds an edge to the `input_edges` if it does not already exist.
     pub(crate) fn add_input_edge(&mut self, edge: Edge) -> Result<(), RenderGraphError> {
         if self.has_input_edge(&edge) {
@@ -98,6 +149,16 @@ impl Edges {
         Ok(())
     }
 
+    /// Removes an edge from the `input_edges` if it exists.
+    pub(crate) fn remove_input_edge(&mut self, edge: Edge) -> Result<(), RenderGraphError> {
+        if let Some(index) = self.input_edges.iter().position(|e| *e == edge) {
+            self.input_edges.swap_remove(index);
+            Ok(())
+        } else {
+            Err(RenderGraphError::EdgeDoesNotExist(edge))
+        }
+    }
+
     /// Adds an edge to the `output_edges` if it does not already exist.
     pub(crate) fn add_output_edge(&mut self, edge: Edge) -> Result<(), RenderGraphError> {
         if self.has_output_edge(&edge) {
@@ -105,6 +166,16 @@ impl Edges {
         }
         self.output_edges.push(edge);
         Ok(())
+    }
+
+    /// Removes an edge from the `output_edges` if it exists.
+    pub(crate) fn remove_output_edge(&mut self, edge: Edge) -> Result<(), RenderGraphError> {
+        if let Some(index) = self.output_edges.iter().position(|e| *e == edge) {
+            self.output_edges.swap_remove(index);
+            Ok(())
+        } else {
+            Err(RenderGraphError::EdgeDoesNotExist(edge))
+        }
     }
 
     /// Checks whether the input edge already exists.
@@ -131,7 +202,7 @@ impl Edges {
             })
             .ok_or(RenderGraphError::UnconnectedNodeInputSlot {
                 input_slot: index,
-                node: self.id,
+                node: self.label,
             })
     }
 
@@ -149,7 +220,7 @@ impl Edges {
             })
             .ok_or(RenderGraphError::UnconnectedNodeOutputSlot {
                 output_slot: index,
-                node: self.id,
+                node: self.label,
             })
     }
 }
@@ -159,8 +230,7 @@ impl Edges {
 ///
 /// The `input_slots` and `output_slots` are provided by the `node`.
 pub struct NodeState {
-    pub id: NodeId,
-    pub name: Option<Cow<'static, str>>,
+    pub label: InternedRenderLabel,
     /// The name of the type that implements [`Node`].
     pub type_name: &'static str,
     pub node: Box<dyn Node>,
@@ -170,27 +240,26 @@ pub struct NodeState {
 }
 
 impl Debug for NodeState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "{:?} ({:?})", self.id, self.name)
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        writeln!(f, "{:?} ({})", self.label, self.type_name)
     }
 }
 
 impl NodeState {
     /// Creates an [`NodeState`] without edges, but the `input_slots` and `output_slots`
     /// are provided by the `node`.
-    pub fn new<T>(id: NodeId, node: T) -> Self
+    pub fn new<T>(label: InternedRenderLabel, node: T) -> Self
     where
         T: Node,
     {
         NodeState {
-            id,
-            name: None,
+            label,
             input_slots: node.input().into(),
             output_slots: node.output().into(),
             node: Box::new(node),
-            type_name: std::any::type_name::<T>(),
+            type_name: core::any::type_name::<T>(),
             edges: Edges {
-                id,
+                label,
                 input_edges: Vec::new(),
                 output_edges: Vec::new(),
             },
@@ -236,41 +305,10 @@ impl NodeState {
     }
 }
 
-/// A [`NodeLabel`] is used to reference a [`NodeState`] by either its name or [`NodeId`]
-/// inside the [`RenderGraph`](super::RenderGraph).
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum NodeLabel {
-    Id(NodeId),
-    Name(Cow<'static, str>),
-}
-
-impl From<&NodeLabel> for NodeLabel {
-    fn from(value: &NodeLabel) -> Self {
-        value.clone()
-    }
-}
-
-impl From<String> for NodeLabel {
-    fn from(value: String) -> Self {
-        NodeLabel::Name(value.into())
-    }
-}
-
-impl From<&'static str> for NodeLabel {
-    fn from(value: &'static str) -> Self {
-        NodeLabel::Name(value.into())
-    }
-}
-
-impl From<NodeId> for NodeLabel {
-    fn from(value: NodeId) -> Self {
-        NodeLabel::Id(value)
-    }
-}
-
 /// A [`Node`] without any inputs, outputs and subgraphs, which does nothing when run.
 /// Used (as a label) to bundle multiple dependencies into one inside
 /// the [`RenderGraph`](super::RenderGraph).
+#[derive(Default)]
 pub struct EmptyNode;
 
 impl Node for EmptyNode {
@@ -280,6 +318,103 @@ impl Node for EmptyNode {
         _render_context: &mut RenderContext,
         _world: &World,
     ) -> Result<(), NodeRunError> {
+        Ok(())
+    }
+}
+
+/// A [`RenderGraph`](super::RenderGraph) [`Node`] that runs the configured subgraph once.
+/// This makes it easier to insert sub-graph runs into a graph.
+pub struct RunGraphOnViewNode {
+    sub_graph: InternedRenderSubGraph,
+}
+
+impl RunGraphOnViewNode {
+    pub fn new<T: RenderSubGraph>(sub_graph: T) -> Self {
+        Self {
+            sub_graph: sub_graph.intern(),
+        }
+    }
+}
+
+impl Node for RunGraphOnViewNode {
+    fn run(
+        &self,
+        graph: &mut RenderGraphContext,
+        _render_context: &mut RenderContext,
+        _world: &World,
+    ) -> Result<(), NodeRunError> {
+        graph.run_sub_graph(self.sub_graph, vec![], Some(graph.view_entity()))?;
+        Ok(())
+    }
+}
+
+/// This trait should be used instead of the [`Node`] trait when making a render node that runs on a view.
+///
+/// It is intended to be used with [`ViewNodeRunner`]
+pub trait ViewNode {
+    /// The query that will be used on the view entity.
+    /// It is guaranteed to run on the view entity, so there's no need for a filter
+    type ViewQuery: ReadOnlyQueryData;
+
+    /// Updates internal node state using the current render [`World`] prior to the run method.
+    fn update(&mut self, _world: &mut World) {}
+
+    /// Runs the graph node logic, issues draw calls, updates the output slots and
+    /// optionally queues up subgraphs for execution. The graph data, input and output values are
+    /// passed via the [`RenderGraphContext`].
+    fn run<'w>(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        view_query: QueryItem<'w, Self::ViewQuery>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError>;
+}
+
+/// This [`Node`] can be used to run any [`ViewNode`].
+/// It will take care of updating the view query in `update()` and running the query in `run()`.
+///
+/// This [`Node`] exists to help reduce boilerplate when making a render node that runs on a view.
+pub struct ViewNodeRunner<N: ViewNode> {
+    view_query: QueryState<N::ViewQuery>,
+    node: N,
+}
+
+impl<N: ViewNode> ViewNodeRunner<N> {
+    pub fn new(node: N, world: &mut World) -> Self {
+        Self {
+            view_query: world.query_filtered(),
+            node,
+        }
+    }
+}
+
+impl<N: ViewNode + FromWorld> FromWorld for ViewNodeRunner<N> {
+    fn from_world(world: &mut World) -> Self {
+        Self::new(N::from_world(world), world)
+    }
+}
+
+impl<T> Node for ViewNodeRunner<T>
+where
+    T: ViewNode + Send + Sync + 'static,
+{
+    fn update(&mut self, world: &mut World) {
+        self.view_query.update_archetypes(world);
+        self.node.update(world);
+    }
+
+    fn run<'w>(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        let Ok(view) = self.view_query.get_manual(world, graph.view_entity()) else {
+            return Ok(());
+        };
+
+        ViewNode::run(&self.node, graph, render_context, view, world)?;
         Ok(())
     }
 }

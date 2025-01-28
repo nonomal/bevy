@@ -1,111 +1,69 @@
-use bevy::{
-    core_pipeline::{draw_3d_graph, node, AlphaMask3d, Opaque3d, Transparent3d},
-    prelude::*,
-    render::{
-        camera::{ActiveCameras, ExtractedCameraNames, RenderTarget},
-        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, SlotValue},
-        render_phase::RenderPhase,
-        renderer::RenderContext,
-        RenderApp, RenderStage,
-    },
-    window::{CreateWindow, PresentMode, WindowId},
-};
+//! Uses two windows to visualize a 3D model from different angles.
 
-/// This example creates a second window and draws a mesh from two different cameras, one in each window
+use bevy::{prelude::*, render::camera::RenderTarget, window::WindowRef};
+
 fn main() {
-    let mut app = App::new();
-    app.add_plugins(DefaultPlugins)
-        .add_startup_system(setup)
-        .add_startup_system(create_new_window);
-
-    let render_app = app.sub_app_mut(RenderApp);
-    render_app.add_system_to_stage(RenderStage::Extract, extract_secondary_camera_phases);
-    let mut graph = render_app.world.resource_mut::<RenderGraph>();
-    graph.add_node(SECONDARY_PASS_DRIVER, SecondaryCameraDriver);
-    graph
-        .add_node_edge(node::MAIN_PASS_DEPENDENCIES, SECONDARY_PASS_DRIVER)
-        .unwrap();
-    app.run();
+    App::new()
+        // By default, a primary window gets spawned by `WindowPlugin`, contained in `DefaultPlugins`
+        .add_plugins(DefaultPlugins)
+        .add_systems(Startup, setup_scene)
+        .run();
 }
 
-fn extract_secondary_camera_phases(mut commands: Commands, active_cameras: Res<ActiveCameras>) {
-    if let Some(secondary) = active_cameras.get(SECONDARY_CAMERA_NAME) {
-        if let Some(entity) = secondary.entity {
-            commands.get_or_spawn(entity).insert_bundle((
-                RenderPhase::<Opaque3d>::default(),
-                RenderPhase::<AlphaMask3d>::default(),
-                RenderPhase::<Transparent3d>::default(),
-            ));
-        }
-    }
-}
-
-const SECONDARY_CAMERA_NAME: &str = "Secondary";
-const SECONDARY_PASS_DRIVER: &str = "secondary_pass_driver";
-
-fn create_new_window(
-    mut create_window_events: EventWriter<CreateWindow>,
-
-    mut commands: Commands,
-    mut active_cameras: ResMut<ActiveCameras>,
-) {
-    let window_id = WindowId::new();
-
-    // sends out a "CreateWindow" event, which will be received by the windowing backend
-    create_window_events.send(CreateWindow {
-        id: window_id,
-        descriptor: WindowDescriptor {
-            width: 800.,
-            height: 600.,
-            present_mode: PresentMode::Immediate,
-            title: "Second window".to_string(),
-            ..default()
-        },
-    });
-    // second window camera
-    commands.spawn_bundle(PerspectiveCameraBundle {
-        camera: Camera {
-            target: RenderTarget::Window(window_id),
-            name: Some(SECONDARY_CAMERA_NAME.into()),
-            ..default()
-        },
-        transform: Transform::from_xyz(6.0, 0.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
-
-    active_cameras.add(SECONDARY_CAMERA_NAME);
-}
-
-struct SecondaryCameraDriver;
-impl Node for SecondaryCameraDriver {
-    fn run(
-        &self,
-        graph: &mut RenderGraphContext,
-        _render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let extracted_cameras = world.resource::<ExtractedCameraNames>();
-        if let Some(camera_3d) = extracted_cameras.entities.get(SECONDARY_CAMERA_NAME) {
-            graph.run_sub_graph(
-                crate::draw_3d_graph::NAME,
-                vec![SlotValue::Entity(*camera_3d)],
-            )?;
-        }
-        Ok(())
-    }
-}
-
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
     // add entities to the world
-    commands.spawn_scene(asset_server.load("models/monkey/Monkey.gltf#Scene0"));
+    commands.spawn(SceneRoot(
+        asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/torus/torus.gltf")),
+    ));
     // light
-    commands.spawn_bundle(PointLightBundle {
-        transform: Transform::from_xyz(4.0, 5.0, 4.0),
+    commands.spawn((
+        DirectionalLight::default(),
+        Transform::from_xyz(3.0, 3.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+
+    let first_window_camera = commands
+        .spawn((
+            Camera3d::default(),
+            Transform::from_xyz(0.0, 0.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ))
+        .id();
+
+    // Spawn a second window
+    let second_window = commands
+        .spawn(Window {
+            title: "Second window".to_owned(),
+            ..default()
+        })
+        .id();
+
+    let second_window_camera = commands
+        .spawn((
+            Camera3d::default(),
+            Transform::from_xyz(6.0, 0.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+            Camera {
+                target: RenderTarget::Window(WindowRef::Entity(second_window)),
+                ..default()
+            },
+        ))
+        .id();
+
+    let node = Node {
+        position_type: PositionType::Absolute,
+        top: Val::Px(12.0),
+        left: Val::Px(12.0),
         ..default()
-    });
-    // main camera
-    commands.spawn_bundle(PerspectiveCameraBundle {
-        transform: Transform::from_xyz(0.0, 0.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
+    };
+
+    commands.spawn((
+        Text::new("First window"),
+        node.clone(),
+        // Since we are using multiple cameras, we need to specify which camera UI should be rendered to
+        UiTargetCamera(first_window_camera),
+    ));
+
+    commands.spawn((
+        Text::new("Second window"),
+        node,
+        UiTargetCamera(second_window_camera),
+    ));
 }

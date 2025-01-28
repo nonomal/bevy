@@ -1,13 +1,14 @@
-use bevy::prelude::*;
-use bevy::winit::WinitPlugin;
+//! Create an application without winit (runs single time, no event loop).
+
+use bevy::{prelude::*, winit::WinitPlugin};
 
 fn main() {
     App::new()
-        .add_plugins_with(DefaultPlugins, |group| group.disable::<WinitPlugin>())
-        .add_system(setup_system)
+        .add_plugins(DefaultPlugins.build().disable::<WinitPlugin>())
+        .add_systems(Update, setup_system)
         .run();
 }
 
 fn setup_system(mut commands: Commands) {
-    commands.spawn_bundle(PerspectiveCameraBundle::default());
+    commands.spawn(Camera3d::default());
 }

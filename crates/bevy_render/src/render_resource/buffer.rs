@@ -1,16 +1,15 @@
-use bevy_utils::Uuid;
-use std::{
-    ops::{Bound, Deref, RangeBounds},
-    sync::Arc,
-};
+use crate::define_atomic_id;
+use crate::renderer::WgpuWrapper;
+use alloc::sync::Arc;
+use core::ops::{Bound, Deref, RangeBounds};
 
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
-pub struct BufferId(Uuid);
+define_atomic_id!(BufferId);
 
 #[derive(Clone, Debug)]
 pub struct Buffer {
     id: BufferId,
-    value: Arc<wgpu::Buffer>,
+    value: Arc<WgpuWrapper<wgpu::Buffer>>,
+    size: wgpu::BufferAddress,
 }
 
 impl Buffer {
@@ -20,14 +19,21 @@ impl Buffer {
     }
 
     pub fn slice(&self, bounds: impl RangeBounds<wgpu::BufferAddress>) -> BufferSlice {
+        // need to compute and store this manually because wgpu doesn't export offset and size on wgpu::BufferSlice
+        let offset = match bounds.start_bound() {
+            Bound::Included(&bound) => bound,
+            Bound::Excluded(&bound) => bound + 1,
+            Bound::Unbounded => 0,
+        };
+        let size = match bounds.end_bound() {
+            Bound::Included(&bound) => bound + 1,
+            Bound::Excluded(&bound) => bound,
+            Bound::Unbounded => self.size,
+        } - offset;
         BufferSlice {
             id: self.id,
-            // need to compute and store this manually because wgpu doesn't export offset on wgpu::BufferSlice
-            offset: match bounds.start_bound() {
-                Bound::Included(&bound) => bound,
-                Bound::Excluded(&bound) => bound + 1,
-                Bound::Unbounded => 0,
-            },
+            offset,
+            size,
             value: self.value.slice(bounds),
         }
     }
@@ -41,8 +47,9 @@ impl Buffer {
 impl From<wgpu::Buffer> for Buffer {
     fn from(value: wgpu::Buffer) -> Self {
         Buffer {
-            id: BufferId(Uuid::new_v4()),
-            value: Arc::new(value),
+            id: BufferId::new(),
+            size: value.size(),
+            value: Arc::new(WgpuWrapper::new(value)),
         }
     }
 }
@@ -61,6 +68,7 @@ pub struct BufferSlice<'a> {
     id: BufferId,
     offset: wgpu::BufferAddress,
     value: wgpu::BufferSlice<'a>,
+    size: wgpu::BufferAddress,
 }
 
 impl<'a> BufferSlice<'a> {
@@ -72,6 +80,11 @@ impl<'a> BufferSlice<'a> {
     #[inline]
     pub fn offset(&self) -> wgpu::BufferAddress {
         self.offset
+    }
+
+    #[inline]
+    pub fn size(&self) -> wgpu::BufferAddress {
+        self.size
     }
 }
 

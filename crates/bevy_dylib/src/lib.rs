@@ -1,5 +1,8 @@
-#![warn(missing_docs)]
-#![allow(clippy::single_component_path_imports)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![doc(
+    html_logo_url = "https://bevyengine.org/assets/icon.png",
+    html_favicon_url = "https://bevyengine.org/assets/icon.png"
+)]
 
 //! Forces dynamic linking of Bevy.
 //!
@@ -15,21 +18,21 @@
 //!
 //! ## The recommended way
 //!
-//! The easiest way to enable dynamic linking is to use the `--features bevy/dynamic` flag when
+//! The easiest way to enable dynamic linking is to use the `--features bevy/dynamic_linking` flag when
 //! using the `cargo run` command:
 //!
-//! `cargo run --features bevy/dynamic`
+//! `cargo run --features bevy/dynamic_linking`
 //!
 //! ## The unrecommended way
 //!
-//! It is also possible to enable the `dynamic` feature inside of the `Cargo.toml` file. This is
+//! It is also possible to enable the `dynamic_linking` feature inside of the `Cargo.toml` file. This is
 //! unrecommended because it requires you to remove this feature every time you want to create a
 //! release build to avoid having to ship additional files with your game.
 //!
-//! To enable dynamic linking inside of the `Cargo.toml` file add the `dynamic` feature to the
+//! To enable dynamic linking inside of the `Cargo.toml` file add the `dynamic_linking` feature to the
 //! bevy dependency:
 //!
-//! `features = ["dynamic"]`
+//! `features = ["dynamic_linking"]`
 //!
 //! ## The manual way
 //!
@@ -51,5 +54,9 @@
 //! ```
 
 // Force linking of the main bevy crate
-#[allow(unused_imports)]
+#[expect(
+    unused_imports,
+    clippy::single_component_path_imports,
+    reason = "This links the main bevy crate when using dynamic linking, and as such cannot be removed or changed without affecting dynamic linking."
+)]
 use bevy_internal;

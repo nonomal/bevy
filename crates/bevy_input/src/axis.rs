@@ -1,12 +1,21 @@
-use bevy_utils::HashMap;
-use std::hash::Hash;
+//! The generic axis type.
 
-/// Stores the position data of input devices of type T
+use bevy_ecs::resource::Resource;
+use bevy_platform_support::collections::HashMap;
+use core::hash::Hash;
+
+#[cfg(feature = "bevy_reflect")]
+use bevy_reflect::Reflect;
+
+/// Stores the position data of the input devices of type `T`.
 ///
-/// Values are stored as `f32` values, which range from `min` to `max`.
-/// The valid range is from -1.0 to 1.0, inclusive.
-#[derive(Debug)]
+/// The values are stored as `f32`s, using [`Axis::set`].
+/// Use [`Axis::get`] to retrieve the value clamped between [`Axis::MIN`] and [`Axis::MAX`]
+/// inclusive, or unclamped using [`Axis::get_unclamped`].
+#[derive(Debug, Resource)]
+#[cfg_attr(feature = "bevy_reflect", derive(Reflect))]
 pub struct Axis<T> {
+    /// The position data of the input devices.
     axis_data: HashMap<T, f32>,
 }
 
@@ -25,38 +34,61 @@ impl<T> Axis<T>
 where
     T: Copy + Eq + Hash,
 {
+    /// The smallest possible axis value.
     pub const MIN: f32 = -1.0;
+
+    /// The largest possible axis value.
     pub const MAX: f32 = 1.0;
 
-    /// Inserts a position data for an input device,
-    /// restricting the position data to an interval `min..=max`.
+    /// Sets the position data of the `input_device` to `position_data`.
     ///
-    /// If the input device wasn't present before, [None] is returned.
-    ///
-    /// If the input device was present, the position data is updated, and the old value is returned.
-    pub fn set(&mut self, input_device: T, position_data: f32) -> Option<f32> {
-        let new_position_data = position_data.clamp(Self::MIN, Self::MAX);
-        self.axis_data.insert(input_device, new_position_data)
+    /// If the `input_device`:
+    /// - was present before, the position data is updated, and the old value is returned.
+    /// - wasn't present before, `None` is returned.
+    pub fn set(&mut self, input_device: impl Into<T>, position_data: f32) -> Option<f32> {
+        self.axis_data.insert(input_device.into(), position_data)
     }
 
-    /// Returns a position data corresponding to the input device.
-    pub fn get(&self, input_device: T) -> Option<f32> {
-        self.axis_data.get(&input_device).copied()
+    /// Returns the position data of the provided `input_device`.
+    ///
+    /// This will be clamped between [`Axis::MIN`] and [`Axis::MAX`] inclusive.
+    pub fn get(&self, input_device: impl Into<T>) -> Option<f32> {
+        self.axis_data
+            .get(&input_device.into())
+            .copied()
+            .map(|value| value.clamp(Self::MIN, Self::MAX))
     }
 
-    /// Removes the position data of the input device,
-    /// returning the position data if the input device was previously set.
-    pub fn remove(&mut self, input_device: T) -> Option<f32> {
-        self.axis_data.remove(&input_device)
+    /// Returns the unclamped position data of the provided `input_device`.
+    ///
+    /// This value may be outside the [`Axis::MIN`] and [`Axis::MAX`] range.
+    ///
+    /// Use for things like camera zoom, where you want devices like mouse wheels to be able to
+    /// exceed the normal range. If being able to move faster on one input device
+    /// than another would give an unfair advantage, you should likely use [`Axis::get`] instead.
+    pub fn get_unclamped(&self, input_device: impl Into<T>) -> Option<f32> {
+        self.axis_data.get(&input_device.into()).copied()
+    }
+
+    /// Removes the position data of the `input_device`, returning the position data if the input device was previously set.
+    pub fn remove(&mut self, input_device: impl Into<T>) -> Option<f32> {
+        self.axis_data.remove(&input_device.into())
+    }
+
+    /// Returns an iterator over all axes.
+    pub fn all_axes(&self) -> impl Iterator<Item = &T> {
+        self.axis_data.keys()
+    }
+
+    /// Returns an iterator over all axes and their values.
+    pub fn all_axes_and_values(&self) -> impl Iterator<Item = (&T, f32)> {
+        self.axis_data.iter().map(|(axis, value)| (axis, *value))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        gamepad::{Gamepad, GamepadButton, GamepadButtonType},
-        Axis,
-    };
+    use crate::{gamepad::GamepadButton, Axis};
 
     #[test]
     fn test_axis_set() {
@@ -75,12 +107,11 @@ mod tests {
         ];
 
         for (value, expected) in cases {
-            let gamepad_button = GamepadButton(Gamepad(1), GamepadButtonType::RightTrigger);
             let mut axis = Axis::<GamepadButton>::default();
 
-            axis.set(gamepad_button, value);
+            axis.set(GamepadButton::RightTrigger, value);
 
-            let actual = axis.get(gamepad_button);
+            let actual = axis.get(GamepadButton::RightTrigger);
             assert_eq!(expected, actual);
         }
     }
@@ -90,14 +121,13 @@ mod tests {
         let cases = [-1.0, -0.9, -0.1, 0.0, 0.1, 0.9, 1.0];
 
         for value in cases {
-            let gamepad_button = GamepadButton(Gamepad(1), GamepadButtonType::RightTrigger);
             let mut axis = Axis::<GamepadButton>::default();
 
-            axis.set(gamepad_button, value);
-            assert!(axis.get(gamepad_button).is_some());
+            axis.set(GamepadButton::RightTrigger, value);
+            assert!(axis.get(GamepadButton::RightTrigger).is_some());
 
-            axis.remove(gamepad_button);
-            let actual = axis.get(gamepad_button);
+            axis.remove(GamepadButton::RightTrigger);
+            let actual = axis.get(GamepadButton::RightTrigger);
             let expected = None;
 
             assert_eq!(expected, actual);

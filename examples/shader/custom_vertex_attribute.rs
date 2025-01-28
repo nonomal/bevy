@@ -1,27 +1,25 @@
+//! A shader that reads a mesh's custom vertex attribute.
+
 use bevy::{
-    ecs::system::{lifetimeless::SRes, SystemParamItem},
-    pbr::MaterialPipeline,
+    pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
-    reflect::TypeUuid,
+    reflect::TypePath,
     render::{
-        mesh::{MeshVertexAttribute, MeshVertexBufferLayout},
-        render_asset::{PrepareAssetError, RenderAsset},
+        mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef},
         render_resource::{
-            std140::{AsStd140, Std140},
-            BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-            BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer,
-            BufferBindingType, BufferInitDescriptor, BufferSize, BufferUsages,
-            RenderPipelineDescriptor, ShaderStages, SpecializedMeshPipelineError, VertexFormat,
+            AsBindGroup, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError,
+            VertexFormat,
         },
-        renderer::RenderDevice,
     },
 };
 
+/// This example uses a shader source file from the assets subdirectory
+const SHADER_ASSET_PATH: &str = "shaders/custom_vertex_attribute.wgsl";
+
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
-        .add_startup_system(setup)
+        .add_plugins((DefaultPlugins, MaterialPlugin::<CustomMaterial>::default()))
+        .add_systems(Startup, setup)
         .run();
 }
 
@@ -36,111 +34,52 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<CustomMaterial>>,
 ) {
-    let mut mesh = Mesh::from(shape::Cube { size: 1.0 });
-    mesh.insert_attribute(
-        ATTRIBUTE_BLEND_COLOR,
-        // The cube mesh has 24 vertices (6 faces, 4 vertices per face), so we insert one BlendColor for each
-        vec![[1.0, 0.0, 0.0, 1.0]; 24],
-    );
+    let mesh = Mesh::from(Cuboid::default())
+        // Sets the custom attribute
+        .with_inserted_attribute(
+            ATTRIBUTE_BLEND_COLOR,
+            // The cube mesh has 24 vertices (6 faces, 4 vertices per face), so we insert one BlendColor for each
+            vec![[1.0, 0.0, 0.0, 1.0]; 24],
+        );
 
     // cube
-    commands.spawn().insert_bundle(MaterialMeshBundle {
-        mesh: meshes.add(mesh),
-        transform: Transform::from_xyz(0.0, 0.5, 0.0),
-        material: materials.add(CustomMaterial {
-            color: Color::WHITE,
-        }),
-        ..default()
-    });
+    commands.spawn((
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(materials.add(CustomMaterial {
+            color: LinearRgba::WHITE,
+        })),
+        Transform::from_xyz(0.0, 0.5, 0.0),
+    ));
 
     // camera
-    commands.spawn_bundle(PerspectiveCameraBundle {
-        transform: Transform::from_xyz(-2.0, 2.5, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(-2.0, 2.5, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
 }
 
 // This is the struct that will be passed to your shader
-#[derive(Debug, Clone, TypeUuid)]
-#[uuid = "f690fdae-d598-45ab-8225-97e2a3f056e0"]
-pub struct CustomMaterial {
-    color: Color,
-}
-
-#[derive(Clone)]
-pub struct GpuCustomMaterial {
-    _buffer: Buffer,
-    bind_group: BindGroup,
-}
-
-// The implementation of [`Material`] needs this impl to work properly.
-impl RenderAsset for CustomMaterial {
-    type ExtractedAsset = CustomMaterial;
-    type PreparedAsset = GpuCustomMaterial;
-    type Param = (SRes<RenderDevice>, SRes<MaterialPipeline<Self>>);
-    fn extract_asset(&self) -> Self::ExtractedAsset {
-        self.clone()
-    }
-
-    fn prepare_asset(
-        extracted_asset: Self::ExtractedAsset,
-        (render_device, material_pipeline): &mut SystemParamItem<Self::Param>,
-    ) -> Result<Self::PreparedAsset, PrepareAssetError<Self::ExtractedAsset>> {
-        let color = Vec4::from_slice(&extracted_asset.color.as_linear_rgba_f32());
-        let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            contents: color.as_std140().as_bytes(),
-            label: None,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        });
-        let bind_group = render_device.create_bind_group(&BindGroupDescriptor {
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-            label: None,
-            layout: &material_pipeline.material_layout,
-        });
-
-        Ok(GpuCustomMaterial {
-            _buffer: buffer,
-            bind_group,
-        })
-    }
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+struct CustomMaterial {
+    #[uniform(0)]
+    color: LinearRgba,
 }
 
 impl Material for CustomMaterial {
-    fn vertex_shader(asset_server: &AssetServer) -> Option<Handle<Shader>> {
-        Some(asset_server.load("shaders/custom_vertex_attribute.wgsl"))
+    fn vertex_shader() -> ShaderRef {
+        SHADER_ASSET_PATH.into()
     }
-    fn fragment_shader(asset_server: &AssetServer) -> Option<Handle<Shader>> {
-        Some(asset_server.load("shaders/custom_vertex_attribute.wgsl"))
-    }
-
-    fn bind_group(render_asset: &<Self as RenderAsset>::PreparedAsset) -> &BindGroup {
-        &render_asset.bind_group
-    }
-
-    fn bind_group_layout(render_device: &RenderDevice) -> BindGroupLayout {
-        render_device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::FRAGMENT,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: BufferSize::new(Vec4::std140_size_static() as u64),
-                },
-                count: None,
-            }],
-            label: None,
-        })
+    fn fragment_shader() -> ShaderRef {
+        SHADER_ASSET_PATH.into()
     }
 
     fn specialize(
+        _pipeline: &MaterialPipeline<Self>,
         descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayout,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        let vertex_layout = layout.get_layout(&[
+        let vertex_layout = layout.0.get_layout(&[
             Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
             ATTRIBUTE_BLEND_COLOR.at_shader_location(1),
         ])?;
